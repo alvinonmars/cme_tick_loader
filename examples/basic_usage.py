@@ -23,8 +23,8 @@ def main():
         footprint = loader.load_footprint_bars('GC', '20210104', interval='5min')
 
         if footprint.empty:
-            print("No data loaded. Please check if data file exists at:")
-            print("/mnt/disk1/cme_futures/GC_1/GC_1_footprint_20210104.csv")
+            print("No data loaded. Please check if data file exists.")
+            print(f"Expected path: {loader.base_path}/GC_1/GC_1_footprint_20210104.csv")
             return
 
         print(f"Loaded {len(footprint)} price levels across {len(footprint.index.get_level_values(0).unique())} bars")

@@ -1,7 +1,175 @@
 # CME Tick Loader Development Documentation
 
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Installation & Setup](#installation--setup)
+   - [Development Installation](#development-installation)
+   - [Data Path Configuration](#data-path-configuration)
+3. [Quick Start](#quick-start)
+4. [Core Data Structure](#core-data-structure)
+5. [Implementation Details (API Reference)](#implementation-details-api-reference)
+6. [Usage Examples](#usage-examples)
+7. [Performance Considerations](#performance-considerations)
+8. [Visualization API](#visualization-api)
+9. [Ticksize Examples](#ticksize-examples)
+10. [Dependencies](#dependencies)
+
+---
+
 ## Overview
+
 Lightweight footprint data loader with time-based aggregation and efficient caching using pandas MultiIndex.
+
+### Key Features
+- **Auto-detected Data Path**: Automatically detects data location based on OS, or use `CME_DATA_PATH` environment variable
+- **Time-based Aggregation**: Aggregate tick data into footprint bars (1min, 5min, 15min, 30min, 1H)
+- **Efficient Caching**: Two-level cache system (ticks + footprints) for fast repeated access
+- **Ticksize Support**: Handles different price increments for various instruments (GC: 0.1, ES: 0.25, etc.)
+- **OHLC Flags**: Built-in open/high/low/close markers for each price level
+
+---
+
+## Installation & Setup
+
+### Development Installation
+
+**Important**: Always switch to conda cs environment before running any Python code:
+
+```bash
+# Activate conda cs environment (Ubuntu/Linux)
+source ~/anaconda3/bin/activate cs
+
+# Activate conda cs environment (macOS)
+source /opt/homebrew/Caskroom/miniconda/base/bin/activate cs
+
+# Install in development mode (local changes take effect immediately)
+pip install -e .
+
+# Verify installation
+python -c "from cme_tick_loader import CMEFootprintLoader; print('Installation successful')"
+```
+
+**Benefits of Development Mode:**
+- Local code changes take effect immediately without reinstallation
+- Other projects can import directly
+- Supports both relative and absolute imports
+
+### Data Path Configuration
+
+#### Overview
+
+The `base_path` is the root directory where CME futures data files are stored. All data files follow the structure:
+```
+base_path/
+├── GC_1/
+│   ├── GC_1_footprint_20210104.csv
+│   ├── GC_1_footprint_20210105.csv
+│   └── ...
+├── ES_1/
+│   ├── ES_1_footprint_20210104.csv
+│   └── ...
+└── .cache/
+    ├── ticks/        # Cached tick data
+    └── footprints/   # Cached aggregated footprints
+```
+
+#### Auto-detection
+
+The library auto-detects the data path based on your operating system:
+- **macOS**: `/Users/alvinma/Desktop/work/data/cme_futures` (development environment default)
+- **Ubuntu/Linux**: `/mnt/disk1/cme_futures`
+- **Windows**: Not supported (recommend using environment variable)
+
+**Note**: The macOS default path is configured for the specific development environment.
+Other users should set the `CME_DATA_PATH` environment variable to their data location.
+
+#### Configuration Methods
+
+You can override the default path using one of three methods (in priority order):
+
+**Method 1: Environment Variable (Recommended)**
+```bash
+# Set environment variable before running Python
+export CME_DATA_PATH=/your/custom/path
+
+# Or set it in Python before importing
+import os
+os.environ['CME_DATA_PATH'] = '/your/custom/path'
+from cme_tick_loader import CMEFootprintLoader
+```
+
+**Method 2: Pass as Parameter**
+```python
+# Explicitly specify path when initializing
+loader = CMEFootprintLoader(base_path='/your/custom/path')
+```
+
+**Method 3: Auto-detection (Default)**
+```python
+# Uses OS-specific default path automatically
+loader = CMEFootprintLoader()
+```
+
+#### Accessing base_path in Custom Code
+
+```python
+# Method 1: Get from loader instance (recommended)
+loader = CMEFootprintLoader()
+base_path = loader.base_path  # Returns pathlib.Path object
+
+# Method 2: Call get_default_base_path() directly
+from cme_tick_loader.config import get_default_base_path
+base_path = get_default_base_path()  # Returns string
+
+# Example: Use in custom functions
+def list_available_symbols(loader):
+    """List all available symbol directories"""
+    return [d.name.replace('_1', '') for d in loader.base_path.iterdir()
+            if d.is_dir() and not d.name.startswith('.')]
+```
+
+---
+
+## Quick Start
+
+### Basic Example
+
+```python
+from cme_tick_loader import CMEFootprintLoader
+
+# 1. Initialize loader (auto-detects data path)
+loader = CMEFootprintLoader()
+
+# 2. Load 5-minute footprint bars for Gold
+footprint = loader.load_footprint_bars('GC', '20210104', interval='5min')
+
+# 3. Explore the data
+print(f"Loaded {len(footprint)} price levels")
+print(f"Time range: {footprint.index.get_level_values(0).min()} to {footprint.index.get_level_values(0).max()}")
+
+# 4. Access a specific bar
+bar_time = footprint.index.get_level_values(0).unique()[0]
+first_bar = footprint.loc[bar_time]
+print(f"\nFirst bar at {bar_time}:")
+print(first_bar)
+
+# 5. Get OHLC
+ohlc = loader.get_ohlc(footprint, bar_time)
+print(f"OHLC: O={ohlc['open']}, H={ohlc['high']}, L={ohlc['low']}, C={ohlc['close']}")
+```
+
+### Loading Multiple Days
+
+```python
+# Load date range
+footprint = loader.load_date_range('GC', '20210104', '20210108', interval='5min')
+
+# Check what data was loaded
+print(f"Total bars: {len(footprint.index.get_level_values(0).unique())}")
+```
+
+---
 
 ## Core Data Structure
 
@@ -39,7 +207,7 @@ Key points:
 - **is_close**: True if price matches the last tick price in the bar
 - A single price can have multiple flags as True (e.g., open=high=low=close in low volatility)
 
-## Implementation
+## Implementation Details (API Reference)
 
 ### 1. Core Loader with Cache
 ```python
@@ -50,7 +218,14 @@ from datetime import datetime
 import os
 
 class TickLoader:
-    def __init__(self, base_path='/mnt/disk1/cme_futures', cache_dir=None, ticksizes=None):
+    def __init__(self, base_path=None, cache_dir=None, ticksizes=None):
+        """
+        Args:
+            base_path: Base directory for CME futures data (auto-detects if None)
+        """
+        if base_path is None:
+            from .config import get_default_base_path
+            base_path = get_default_base_path()
         self.base_path = Path(base_path)
         # Cache directory under base path
         if cache_dir is None:
@@ -186,7 +361,14 @@ class FootprintAggregator:
 ### 3. Cache Manager
 ```python
 class FootprintCache:
-    def __init__(self, base_path='/mnt/disk1/cme_futures', cache_dir=None):
+    def __init__(self, base_path=None, cache_dir=None):
+        """
+        Args:
+            base_path: Base directory for CME futures data (auto-detects if None)
+        """
+        if base_path is None:
+            from .config import get_default_base_path
+            base_path = get_default_base_path()
         self.base_path = Path(base_path)
         # Cache directory under base path
         if cache_dir is None:
@@ -220,7 +402,15 @@ class FootprintCache:
 ### 4. Main API
 ```python
 class CMEFootprintLoader:
-    def __init__(self, base_path='/mnt/disk1/cme_futures', ticksizes=None):
+    def __init__(self, base_path=None, ticksizes=None):
+        """
+        Args:
+            base_path: Base directory for CME futures data (auto-detects if None)
+        """
+        if base_path is None:
+            from .config import get_default_base_path
+            base_path = get_default_base_path()
+        self.base_path = Path(base_path)
         self.tick_loader = TickLoader(base_path, ticksizes=ticksizes)
         self.aggregator = FootprintAggregator()
         self.footprint_cache = FootprintCache(base_path)
@@ -284,9 +474,9 @@ class CMEFootprintLoader:
 
 ## Usage Examples
 
-### Basic Usage
+### Basic Operations
 ```python
-# Initialize loader with default ticksizes
+# Initialize loader (auto-detects data path based on OS)
 loader = CMEFootprintLoader()
 
 # Or initialize with custom ticksizes
@@ -914,9 +1104,7 @@ class FootprintVisualizer:
         return fig
 ```
 
-## Usage Examples with Visualization
-
-### Complete Example
+### Complete Visualization Example
 ```python
 # Load data with ticksize awareness
 loader = CMEFootprintLoader()
@@ -981,26 +1169,7 @@ def create_dashboard(footprint_data, symbol="GC"):
     return fig
 ```
 
-## Environment Setup
-
-### Development Installation
-**Important**: Always switch to conda cs environment before running any Python code:
-
-```bash
-# Activate conda cs environment
-source ~/anaconda3/bin/activate cs
-
-# Install in development mode (local changes take effect immediately)
-pip install -e .
-
-# Verify installation
-python -c "from cme_tick_loader import CMEFootprintLoader; print('Installation successful')"
-```
-
-### Benefits of Development Mode
-- Local code changes take effect immediately without reinstallation
-- Other projects can import directly
-- Supports both relative and absolute imports
+---
 
 ## Ticksize Examples
 

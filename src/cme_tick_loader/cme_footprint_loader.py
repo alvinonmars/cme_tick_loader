@@ -8,14 +8,17 @@ from .footprint_cache import FootprintCache
 
 
 class CMEFootprintLoader:
-    def __init__(self, base_path='/mnt/disk1/cme_futures', ticksizes=None):
+    def __init__(self, base_path=None, ticksizes=None):
         """
         Initialize CME Footprint Loader
 
         Args:
-            base_path: Base path for CME futures data
+            base_path: Base path for CME futures data (auto-detects if None)
             ticksizes: Dictionary of symbol -> ticksize mappings
         """
+        if base_path is None:
+            from .config import get_default_base_path
+            base_path = get_default_base_path()
         self.base_path = Path(base_path)
         self.tick_loader = TickLoader(base_path, ticksizes=ticksizes)
         self.aggregator = FootprintAggregator()

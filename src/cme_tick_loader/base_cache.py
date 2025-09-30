@@ -8,15 +8,18 @@ from abc import ABC, abstractmethod
 class BaseCache(ABC):
     """Base class for cache implementations"""
 
-    def __init__(self, base_path='/mnt/disk1/cme_futures', cache_subdir='cache', cache_dir=None):
+    def __init__(self, base_path=None, cache_subdir='cache', cache_dir=None):
         """
         Initialize base cache
 
         Args:
-            base_path: Base path for data
+            base_path: Base path for data (auto-detects if None)
             cache_subdir: Subdirectory name under .cache/
             cache_dir: Custom cache directory (overrides default)
         """
+        if base_path is None:
+            from .config import get_default_base_path
+            base_path = get_default_base_path()
         self.base_path = Path(base_path)
 
         if cache_dir is None:

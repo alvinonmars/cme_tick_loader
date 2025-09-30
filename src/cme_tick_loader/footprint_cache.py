@@ -5,14 +5,17 @@ from pathlib import Path
 
 
 class FootprintCache:
-    def __init__(self, base_path='/mnt/disk1/cme_futures', cache_dir=None):
+    def __init__(self, base_path=None, cache_dir=None):
         """
         Initialize footprint cache
 
         Args:
-            base_path: Base path for CME futures data
+            base_path: Base path for CME futures data (auto-detects if None)
             cache_dir: Cache directory (defaults to base_path/.cache/footprints)
         """
+        if base_path is None:
+            from .config import get_default_base_path
+            base_path = get_default_base_path()
         self.base_path = Path(base_path)
         # Cache directory under base path
         if cache_dir is None:

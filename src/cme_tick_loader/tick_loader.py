@@ -11,17 +11,20 @@ except ImportError:
 
 
 class TickLoader(BaseCache):
-    def __init__(self, base_path='/mnt/disk1/cme_futures', cache_dir=None, ticksizes=None):
+    def __init__(self, base_path=None, cache_dir=None, ticksizes=None):
         """
         Initialize tick loader
 
         Args:
-            base_path: Base path for CME futures data
+            base_path: Base path for CME futures data (auto-detects if None)
             cache_dir: Cache directory (defaults to base_path/.cache/ticks)
             ticksizes: Dictionary of symbol -> ticksize mappings
         """
+        if base_path is None:
+            from .config import get_default_base_path
+            base_path = get_default_base_path()
         super().__init__(base_path, 'ticks', cache_dir)
-        self.base_path = Path(base_path)
+        # Note: self.base_path is already set by parent class BaseCache
 
         # Default ticksizes for common instruments
         self.ticksizes = ticksizes or {
