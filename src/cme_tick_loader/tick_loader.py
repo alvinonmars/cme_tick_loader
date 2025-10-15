@@ -95,10 +95,8 @@ class TickLoader(BaseCache):
             else:
                 raise
 
-        # Normalize prices to ticksize if available
-        if symbol in self.ticksizes:
-            ticksize = self.ticksizes[symbol]
-            df['price'] = (df['price'] / ticksize).round() * ticksize
+        # Note: Ticksize normalization removed
+        # Normalization should be done at higher level if needed
 
         # Save to cache
         if use_cache:
