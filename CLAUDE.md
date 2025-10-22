@@ -158,11 +158,49 @@ mlfinlab API (batch_size=50000000)
 **返回**:
 ```python
 {
-    'bars': DataFrame,      # 列：date_time, open, high, low, close, volume...
+    'bars': DataFrame,      # OHLCV + 统计信息（详见下方列结构）
     'footprint': DataFrame  # MultiIndex(bar_timestamp, price)
                            # 列：bid_vol, ask_vol, total_vol, delta,
                            #     is_open, is_high, is_low, is_close
 }
+```
+
+**bars DataFrame 列结构**:
+
+| 列名 | 类型 | 说明 |
+|------|------|------|
+| `date_time` | datetime64[ns] | Bar时间戳（TIME bars对齐到边界，其他类型为最后一个tick时间） |
+| `tick_num` | int | Bar形成时的累积tick计数器 |
+| `open_time_ms` | int | **第一个tick的Unix毫秒时间戳**（精确微观结构分析） |
+| `close_time_ms` | int | **最后一个tick的Unix毫秒时间戳**（精确微观结构分析） |
+| `open` | float | 开盘价（第一个tick价格） |
+| `high` | float | 最高价 |
+| `low` | float | 最低价 |
+| `close` | float | 收盘价（最后一个tick价格） |
+| `volume` | int | 成交量 |
+| `cum_buy_volume` | int | 累积买方主动成交量 |
+| `cum_ticks` | int | Bar内tick数量 |
+| `cum_dollar_value` | float | 累积成交金额 |
+
+**重要**：`open_time_ms` 和 `close_time_ms` 是mlfinlab v1.6+新增的字段，用于解决TIME bars的精度问题：
+
+- **TIME bars**：`date_time` 被对齐到时间边界（如10:00:00.000），但实际第一个tick可能在09:59:58.123，最后一个tick在10:00:00.456
+- **其他bars**：`date_time` 等于最后一个tick的时间戳，但仍可通过 `open_time_ms` 获取第一个tick的精确时间
+
+**使用场景**：
+```python
+# 计算bar的实际时长（微秒精度）
+bars['duration_ms'] = bars['close_time_ms'] - bars['open_time_ms']
+
+# 转换为datetime对象
+bars['open_time'] = pd.to_datetime(bars['open_time_ms'], unit='ms')
+bars['close_time'] = pd.to_datetime(bars['close_time_ms'], unit='ms')
+
+# 对于TIME bars，检查对齐偏差
+bars['alignment_offset_ms'] = (
+    pd.to_datetime(bars['date_time']).astype('int64') // 10**6
+    - bars['close_time_ms']
+)
 ```
 
 注意：API设计为总是返回完整的bars和footprint数据，用户可以选择性使用footprint。
@@ -304,6 +342,71 @@ bars = result['bars']
 returns = bars['close'].pct_change()  # 自动使用 datetime index
 ```
 
+### Example 5: 精确时间戳分析 (open_time_ms / close_time_ms)
+
+```python
+loader = CMEBarsLoader()
+
+# 加载TIME bars
+result = loader.load_bars('GC', '20210104', resolution='MIN', num_units=5)
+bars = result['bars']
+
+# 1. 计算每个bar的实际时长
+bars['duration_ms'] = bars['close_time_ms'] - bars['open_time_ms']
+bars['duration_sec'] = bars['duration_ms'] / 1000
+
+print(f"平均bar时长: {bars['duration_sec'].mean():.2f} 秒")
+print(f"5分钟TIME bars理论时长: 300 秒")
+print(f"实际偏差: {bars['duration_sec'].mean() - 300:.2f} 秒")
+
+# 2. 转换为精确的datetime对象
+bars['open_time'] = pd.to_datetime(bars['open_time_ms'], unit='ms')
+bars['close_time'] = pd.to_datetime(bars['close_time_ms'], unit='ms')
+
+# 3. 分析TIME bars的对齐偏差
+# date_time是对齐的边界时间，close_time是实际最后一个tick时间
+bars['close_offset_ms'] = (
+    pd.to_datetime(bars['date_time']).astype('int64') // 10**6
+    - bars['close_time_ms']
+)
+
+print("\n前3个bars的时间对齐分析:")
+print(bars[['date_time', 'open_time', 'close_time', 'duration_sec', 'close_offset_ms']].head(3))
+
+# 输出示例:
+#          date_time                open_time               close_time  duration_sec  close_offset_ms
+# 0  2021-01-04 00:05:00  2021-01-04 00:00:00.003  2021-01-04 00:04:59.966       299.963           34
+# 1  2021-01-04 00:10:00  2021-01-04 00:05:00.012  2021-01-04 00:09:59.988       299.976           12
+# 2  2021-01-04 00:15:00  2021-01-04 00:10:00.005  2021-01-04 00:14:59.995       299.990            5
+
+# 4. 微观结构分析：检测bar形成的速度
+bars['ticks_per_second'] = bars['cum_ticks'] / bars['duration_sec']
+
+# 找到高频交易活跃的bar
+high_freq_bars = bars[bars['ticks_per_second'] > bars['ticks_per_second'].quantile(0.9)]
+print(f"\n高频交易活跃的bars数量: {len(high_freq_bars)}")
+print(f"平均tick频率: {bars['ticks_per_second'].mean():.2f} ticks/秒")
+
+# 5. 使用场景：检测数据质量
+# 如果duration_ms过小，可能是数据缺失
+suspicious_bars = bars[bars['duration_ms'] < 1000]  # 少于1秒
+if len(suspicious_bars) > 0:
+    print(f"\n警告：发现 {len(suspicious_bars)} 个异常短的bars（<1秒）")
+```
+
+**为什么需要 open_time_ms 和 close_time_ms？**
+
+TIME bars有一个重要的特性：`date_time` 被强制对齐到时间边界。例如：
+- 5分钟TIME bars：date_time总是 00:05:00, 00:10:00, 00:15:00...
+- 但实际交易可能在 00:04:59.5 就停止了（周末前）
+- 或在 00:00:00.5 才开始（周一开盘）
+
+使用 `open_time_ms` 和 `close_time_ms` 可以：
+1. **精确计算bar时长**：真实的市场活跃时间
+2. **检测数据质量**：发现缺失或异常的数据段
+3. **微观结构研究**：分析tick到达频率、订单流速度
+4. **回测精度**：使用真实的交易时间而非对齐时间
+
 ---
 
 ## Caching Strategy
@@ -333,6 +436,40 @@ load_bars(use_cache=True, refresh_cache=True)
 # 不使用缓存
 load_bars(use_cache=False)
 ```
+
+### 缓存版本兼容性
+
+**重要**：mlfinlab v1.6+ 新增了 `open_time_ms` 和 `close_time_ms` 字段。如果你的result cache是在旧版本生成的，将**不包含这两个字段**。
+
+**检测方法**：
+```python
+result = loader.load_bars('GC', '20210104', resolution='MIN', num_units=5)
+bars = result['bars']
+
+# 检查是否包含新字段
+if 'open_time_ms' not in bars.columns:
+    print("⚠️  检测到旧版本缓存，缺少 open_time_ms 和 close_time_ms 字段")
+    print("   请清除result cache: loader.clear_cache('result')")
+```
+
+**解决方法**：
+```python
+# 方法1: 清除所有result cache（推荐）
+loader.clear_cache('result')
+
+# 方法2: 强制刷新特定bar的cache
+result = loader.load_bars('GC', '20210104', resolution='MIN', num_units=5,
+                          refresh_cache=True)
+
+# 方法3: 临时禁用cache
+result = loader.load_bars('GC', '20210104', resolution='MIN', num_units=5,
+                          use_cache=False)
+```
+
+**注意**：
+- Tick cache不受影响（只存储原始tick数据）
+- 只需清除一次result cache，后续会自动使用新格式
+- 新格式的result cache与旧版本**不兼容**
 
 ---
 
@@ -397,5 +534,5 @@ plotly>=5.0.0  # optional
 
 ---
 
-**Version**: 2.1
-**Last Updated**: 2025-10-16
+**Version**: 2.2
+**Last Updated**: 2025-10-21
