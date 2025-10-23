@@ -460,6 +460,52 @@ TIME bars有一个重要的特性：`date_time` 被强制对齐到时间边界�
 3. **微观结构研究**：分析tick到达频率、订单流速度
 4. **回测精度**：使用真实的交易时间而非对齐时间
 
+### Example 6: 可视化 - ChartAPI
+
+**推荐使用 ChartAPI** 进行专业图表绘制，支持蜡烛图、volume、cumulative delta 等多个子图。
+
+```python
+from cme_tick_loader import CMEBarsLoader, ChartAPI
+
+loader = CMEBarsLoader()
+result = loader.load_bars('GC', '20210104', resolution='MIN', num_units=5)
+
+# 创建专业图表（蜡烛图 + Volume + Cumulative Delta）
+chart = ChartAPI(symbol='GC', tick_size=0.1)
+chart.create_candlestick(
+    result['bars'],
+    footprint_df=result['footprint'],
+    show_volume=True,        # Volume 子图
+    show_cum_delta=True,     # Cumulative Delta 子图
+    show_atr=False           # ATR 子图（可选）
+)
+chart.show()
+
+# 叠加水平线（如 POC, VAH, VAL）
+chart.add_horizontal_lines(
+    y_values=[1850.0, 1860.0],  # 关键价格位
+    color='blue',
+    dash='dash',
+    name='Key Levels'
+)
+chart.show()
+
+# 保存为 HTML
+chart.save_html('gc_analysis.html')
+```
+
+**ChartAPI 特性**：
+- ✅ 蜡烛图 + 多个技术指标子图（共享 x 轴）
+- ✅ 支持矩形、线条、标签的叠加
+- ✅ 链式 API，易用性好
+- ✅ 索引模式支持（`use_index_mode=True`）适配非均匀时间 bars（如 VOLUME bars）
+
+**FootprintVisualizer 已弃用**：
+```python
+# ⚠️ DEPRECATED: FootprintVisualizer.plot_footprint() 有已知问题，不推荐使用
+# 请改用 ChartAPI
+```
+
 ---
 
 ## Caching Strategy
@@ -587,10 +633,18 @@ plotly>=5.0.0  # optional
 
 ---
 
-**Version**: 2.3
+**Version**: 2.4
 **Last Updated**: 2025-10-23
 
 ## Changelog
+
+**v2.4** (2025-10-23) - 引入 ChartAPI 专业可视化
+- 🟢 新增 `ChartAPI` 类，支持蜡烛图 + 多技术指标子图
+- 🟢 支持 Volume, Cumulative Delta, ATR 等子图
+- 🟢 链式 API 设计，支持矩形、线条、标签叠加
+- 🟢 索引模式支持非均匀时间 bars（VOLUME bars）
+- ⚠️ `FootprintVisualizer.plot_footprint()` 标记为 deprecated（已知问题）
+- 📚 更新 notebook 使用 ChartAPI 进行可视化
 
 **v2.3** (2025-10-23) - 添加数据预处理器
 - 🟢 新增 `DataPreprocessor` 类，支持从 footprint 生成增强数据

@@ -1,4 +1,17 @@
-"""Professional Footprint visualization - Direct implementation based on reference code logic"""
+"""
+Professional Footprint visualization - Direct implementation based on reference code logic
+
+DEPRECATION WARNING:
+    FootprintVisualizer.plot_footprint() is deprecated and has known issues.
+    Please use ChartAPI instead for candlestick charts with volume and cumulative delta:
+
+    from cme_tick_loader import ChartAPI
+
+    chart = ChartAPI('GC', tick_size=0.1)
+    chart.create_candlestick(bars, footprint_df=footprint,
+                            show_volume=True, show_cum_delta=True)
+    chart.show()
+"""
 
 import pandas as pd
 import numpy as np
@@ -6,6 +19,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, Optional
+import warnings
 
 
 @dataclass
@@ -137,6 +151,8 @@ class FootprintVisualizer:
         """
         Professional footprint chart - Direct implementation of reference code logic
 
+        DEPRECATED: This method has known issues. Use ChartAPI instead.
+
         Args:
             footprint_data: MultiIndex DataFrame with footprint data
             ticksize: Price increment for formatting (e.g., 0.1 for GC)
@@ -148,6 +164,16 @@ class FootprintVisualizer:
         Returns:
             go.Figure: Professional footprint chart
         """
+        warnings.warn(
+            "FootprintVisualizer.plot_footprint() is deprecated and has known issues. "
+            "Please use ChartAPI instead: "
+            "from cme_tick_loader import ChartAPI; "
+            "chart = ChartAPI('GC', tick_size=0.1); "
+            "chart.create_candlestick(bars, footprint_df=footprint, show_volume=True, show_cum_delta=True); "
+            "chart.show()",
+            DeprecationWarning,
+            stacklevel=2
+        )
         # Use provided config or instance config
         cfg = config or self.config
 

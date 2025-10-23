@@ -6,9 +6,26 @@ Footprint Bar 数据格式 - 所有下游系统的统一输入
 2. 严格验证：bars.index == footprint.index.levels[0]
 3. 避免重复计算：OHLC 由 mlfinlab 聚合，只计算增强指标
 4. Metadata 记录：resolution, num_units 用于验证一致性
+5. 切片能力：slice(index) 根据时间戳索引切片数据
+
+工具函数：
+- get_detection_data(): 计算检测窗口的时间戳索引（纯索引计算）
+- find_nearest_timestamp(): 模糊查找最接近的时间戳
 
 架构：
     CMEBarsLoader → FootprintBarData.from_result() → key_zone_detector / trading_system
+
+使用示例：
+    # 1. 加载数据
+    result = loader.load_bars('GC', '20210104', 'MIN', 5)
+    bar_data = FootprintBarData.from_result(result, 'MIN', 5)
+
+    # 2. 计算检测窗口索引
+    detection_index = get_detection_data(bar_data.bars.index, target_ts, 50)
+
+    # 3. 切片数据
+    if detection_index is not None:
+        detection_data = bar_data.slice(detection_index)
 """
 
 import numpy as np
@@ -85,6 +102,53 @@ class FootprintBarData:
     def __len__(self) -> int:
         """返回 bar 数量"""
         return len(self.bars)
+
+    def slice(self, index: pd.DatetimeIndex) -> 'FootprintBarData':
+        """
+        根据时间戳索引切片，返回新的 FootprintBarData
+
+        Args:
+            index: 要切片的时间戳索引（DatetimeIndex 或 list/array of timestamps）
+
+        Returns:
+            新的 FootprintBarData 实例
+
+        Raises:
+            ValueError: 如果 index 中有不存在的时间戳
+
+        Example:
+            >>> # 获取检测窗口的索引
+            >>> detection_index = get_detection_data(bar_data.bars.index, target_ts, 50)
+            >>> # 切片数据
+            >>> detection_data = bar_data.slice(detection_index)
+        """
+        # 转换为 DatetimeIndex（如果不是）
+        if not isinstance(index, pd.DatetimeIndex):
+            index = pd.DatetimeIndex(index)
+
+        # 验证所有时间戳都存在
+        missing = index.difference(self.bars.index)
+        if len(missing) > 0:
+            raise ValueError(
+                f"Index contains {len(missing)} timestamps not in bars.index. "
+                f"First few missing: {missing[:5].tolist()}"
+            )
+
+        # 切片 bars（保持 DatetimeIndex）
+        sliced_bars = self.bars.loc[index].copy()
+
+        # 切片 footprint（MultiIndex 的第一层）
+        sliced_footprint = self.footprint_df.loc[
+            self.footprint_df.index.get_level_values(0).isin(index)
+        ].copy()
+
+        # 返回新实例（保持 metadata）
+        return FootprintBarData(
+            bars=sliced_bars,
+            footprint_df=sliced_footprint,
+            resolution=self.resolution,
+            num_units=self.num_units
+        )
 
     @property
     def price_range(self) -> tuple:
@@ -381,29 +445,44 @@ def find_nearest_timestamp(
 
 
 def get_detection_data(
-    full_data: pd.DataFrame,
+    bars_index: pd.DatetimeIndex,
     target_bar_time: pd.Timestamp,
     lookback_bars: int,
     tolerance: pd.Timedelta = pd.Timedelta(minutes=10)
-) -> Optional[pd.DataFrame]:
+) -> Optional[pd.DatetimeIndex]:
     """
-    获取检测数据窗口 - 支持模糊时间戳匹配
+    计算检测窗口的时间戳索引 - 支持模糊时间戳匹配
 
-    核心改进：
+    职责：纯索引计算，不涉及数据切片
+    使用：配合 FootprintBarData.slice() 完成数据提取
+
+    核心特性：
     1. 模糊查找时间戳（容差内匹配）
     2. 确保返回 <= target_bar_time（避免未来数据泄露）
     3. 精确控制 bar 数量
 
     Args:
-        full_data: 完整的 footprint 数据（MultiIndex: bar_timestamp, price）
+        bars_index: bars 的时间戳索引（DatetimeIndex，已排序）
         target_bar_time: 目标 bar 时间（可以是近似时间）
-        lookback_bars: 回看 bar 数量
-        tolerance: 时间戳匹配容差（默认30秒）
+        lookback_bars: 回看 bar 数量（包含 target 本身）
+        tolerance: 时间戳匹配容差（默认10分钟）
 
     Returns:
-        提取的检测窗口数据，数据不足或超出容差则返回 None
+        检测窗口的时间戳索引（长度为 lookback_bars），数据不足或超出容差则返回 None
+
+    Example:
+        >>> # 1. 计算检测窗口的索引
+        >>> detection_index = get_detection_data(
+        ...     bar_data.bars.index,
+        ...     target_timestamp,
+        ...     lookback_bars=50
+        ... )
+        >>> # 2. 切片数据
+        >>> if detection_index is not None:
+        ...     detection_data = bar_data.slice(detection_index)
     """
-    all_times = full_data.index.get_level_values(0).unique().sort_values()
+    # 确保索引已排序
+    all_times = bars_index.sort_values()
 
     # 模糊查找最近的时间戳（<= target）
     actual_target = find_nearest_timestamp(all_times, target_bar_time, tolerance)
@@ -426,6 +505,4 @@ def get_detection_data(
     if len(selected_times) != lookback_bars:
         return None
 
-    return full_data[
-        full_data.index.get_level_values(0).isin(selected_times)
-    ]
+    return selected_times

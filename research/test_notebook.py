@@ -21,7 +21,7 @@ try:
     import warnings
     warnings.filterwarnings('ignore')
 
-    from cme_tick_loader import CMEBarsLoader, FootprintVisualizer, FootprintConfig
+    from cme_tick_loader import CMEBarsLoader, FootprintVisualizer, FootprintConfig, ChartAPI
 
     pd.set_option('display.max_columns', None)
     pd.set_option('display.width', None)
