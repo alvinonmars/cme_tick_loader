@@ -11,9 +11,10 @@
 3. [Quick Start](#quick-start)
 4. [Core Architecture](#core-architecture)
 5. [API Reference](#api-reference)
-6. [Usage Examples](#usage-examples)
-7. [Caching Strategy](#caching-strategy)
-8. [Technical Details](#technical-details)
+6. [Data Preprocessor](#data-preprocessor)
+7. [Usage Examples](#usage-examples)
+8. [Caching Strategy](#caching-strategy)
+9. [Technical Details](#technical-details)
 
 ---
 
@@ -258,6 +259,58 @@ ticksize = loader.get_ticksize('GC')  # 0.1
 viz = FootprintVisualizer()
 fig = viz.plot_footprint(result['footprint'], ticksize=ticksize)
 ```
+
+---
+
+## StandardBarData - 标准 Bar 数据格式
+
+**StandardBarData** 是所有下游系统（key_zone_detector, trading_system）的统一输入格式。
+
+### 核心设计
+
+```
+CMEBarsLoader → StandardBarData.from_result() → key_zone_detector / trading_system
+```
+
+**关键保证**:
+- `bars.index` == `footprint.index.levels[0]` （严格对齐）
+- 避免重复计算：OHLC 由 mlfinlab 聚合，只计算 VWAP/POC/VAH/VAL
+- 自动验证：去重、排序、timezone-naive
+
+### 数据结构
+
+```python
+@dataclass
+class StandardBarData:
+    bars: pd.DataFrame          # OHLCV + VWAP + POC/VAH/VAL
+    footprint_df: pd.DataFrame  # 原始 footprint
+```
+
+**增强列**:
+- `vwap`: 成交量加权平均价
+- `poc`: Point of Control（成交量最密集价格）
+- `vah`: Value Area High（70%成交量上界）
+- `val`: Value Area Low（70%成交量下界）
+
+### 使用方法
+
+```python
+from cme_tick_loader import CMEBarsLoader, StandardBarData
+
+# 加载并增强
+result = loader.load_bars('GC', '20210104', 'MIN', 5)
+bar_data = StandardBarData.from_result(result)
+
+# 访问数据
+print(bar_data.bars[['vwap', 'poc', 'vah', 'val']].head())
+```
+
+### Volume Profile 指标
+
+- **POC**: 成交量最大的价格点（市场公允价值）
+- **VAH/VAL**: 70%成交量区间（正常波动范围）
+  - 价格突破 VAH → 强势
+  - 价格跌破 VAL → 弱势
 
 ---
 
@@ -534,5 +587,17 @@ plotly>=5.0.0  # optional
 
 ---
 
-**Version**: 2.2
-**Last Updated**: 2025-10-21
+**Version**: 2.3
+**Last Updated**: 2025-10-23
+
+## Changelog
+
+**v2.3** (2025-10-23) - 添加数据预处理器
+- 🟢 新增 `DataPreprocessor` 类，支持从 footprint 生成增强数据
+- 🟢 新增 `StandardBarData` dataclass，包含 VWAP 和 Volume Profile 指标
+- 🟢 新增 `get_detection_data()` 工具函数，用于提取检测窗口
+- 🟢 支持 POC/VAH/VAL 计算（Volume Profile 核心指标）
+- 📚 完整的文档和使用示例
+
+**v2.2** (2025-10-21) - mlfinlab v1.6+ 兼容
+- 新增 `open_time_ms` 和 `close_time_ms` 字段支持
