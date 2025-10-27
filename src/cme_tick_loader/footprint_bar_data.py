@@ -56,6 +56,35 @@ class FootprintBarData:
         >>> print(len(bar_data))
         >>> print(bar_data.bars[['vwap', 'poc', 'vah', 'val']].head())
     """
+
+    # ===== 列定义（Schema - Single Source of Truth）=====
+
+    # Bars 核心列（OHLCV，必需）
+    BARS_CORE_COLUMNS = ['open', 'high', 'low', 'close', 'volume']
+
+    # Bars 增强列（Volume Profile 指标，可选）
+    BARS_ENHANCED_COLUMNS = ['vwap', 'poc', 'vah', 'val']
+
+    # Bars 标准列（默认使用，包含所有列）
+    BARS_STANDARD_COLUMNS = BARS_CORE_COLUMNS + BARS_ENHANCED_COLUMNS
+
+    # Footprint 核心列（买卖量，必需）
+    FOOTPRINT_CORE_COLUMNS = ['bid_vol', 'ask_vol']
+
+    # Footprint 计算列（由核心列计算）
+    FOOTPRINT_CALC_COLUMNS = ['total_vol', 'delta']
+
+    # Footprint OHLC 标记列（价格层级标记）
+    FOOTPRINT_OHLC_MARKERS = ['is_open', 'is_high', 'is_low', 'is_close']
+
+    # Footprint 标准列（默认使用，包含所有列）
+    FOOTPRINT_STANDARD_COLUMNS = (
+        FOOTPRINT_CORE_COLUMNS +
+        FOOTPRINT_CALC_COLUMNS +
+        FOOTPRINT_OHLC_MARKERS
+    )
+
+    # ===== 数据字段 =====
     bars: pd.DataFrame
     footprint_df: pd.DataFrame
     resolution: str
@@ -272,10 +301,9 @@ class FootprintBarData:
             if 'poc' not in bars.columns:
                 bars = cls._add_volume_profile(bars, footprint)
 
-        # 6. 过滤列：只保留标准列（确保与所有数据源一致性）
+        # 6. 过滤列：只保留标准列（使用类常量确保一致性）
         # 过滤掉 mlfinlab 的 metadata 列（tick_num, open_time_ms, close_time_ms, cum_buy_volume, cum_ticks, cum_dollar_value）
-        STANDARD_COLUMNS = ['open', 'high', 'low', 'close', 'volume', 'vwap', 'poc', 'vah', 'val']
-        bars = bars[STANDARD_COLUMNS]
+        bars = bars[cls.BARS_STANDARD_COLUMNS]
 
         # 7. 创建实例（会自动验证）
         return cls(
