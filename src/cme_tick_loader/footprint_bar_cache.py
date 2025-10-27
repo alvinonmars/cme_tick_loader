@@ -95,7 +95,12 @@ class FootprintBarDataCache:
             if use_cache and key in self._cache:
                 cached = self._cache[key]
                 if self._has_complete_coverage(cached, start, end):
-                    return self._extract_range(cached, start, end)
+                    extracted = self._extract_range(cached, start, end)
+                    # 🔥 纵深防御：即使coverage检查通过，仍需验证提取结果非空
+                    # 防止边缘情况下的空数据（如缓存空洞、切片错误）
+                    if not extracted.bars.empty:
+                        return extracted
+                    # 提取为空，fallback到数据源加载
 
             # Level 2: 从数据源加载
             bars, footprint = self._loader(symbol, resolution, num_units, start, end)
@@ -372,14 +377,27 @@ class FootprintBarDataCache:
         start: pd.Timestamp,
         end: pd.Timestamp
     ) -> bool:
-        """检查是否完整覆盖 [start, end]"""
+        """
+        检查是否完整覆盖 [start, end]
+
+        关键修复：不仅检查边界，还要检查范围内是否有实际数据
+        防止缓存空洞导致误判
+        """
         if bar_data.bars.empty:
             return False
 
-        cache_start = bar_data.bars.index.min()
-        cache_end = bar_data.bars.index.max()
+        # 提取查询范围内的实际数据
+        range_bars = bar_data.bars.loc[start:end]
 
-        return cache_start <= start and cache_end >= end
+        # 范围内必须有数据
+        if range_bars.empty:
+            return False
+
+        # 检查范围内数据的边界是否覆盖查询范围
+        range_start = range_bars.index.min()
+        range_end = range_bars.index.max()
+
+        return range_start <= start and range_end >= end
 
     @staticmethod
     def _extract_range(
