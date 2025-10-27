@@ -292,29 +292,31 @@ class FootprintBarData:
             bars = bars.sort_index()
             footprint = footprint.sort_index()
 
-        # 4. 添加 VWAP
-        if add_vwap and 'vwap' not in bars.columns:
-            bars = cls._add_vwap(bars, footprint)
-
-        # 5. 添加 Volume Profile 指标
-        if add_volume_profile:
-            if 'poc' not in bars.columns:
-                bars = cls._add_volume_profile(bars, footprint)
-
-        # 6. 过滤列：只保留标准列（使用类常量确保一致性）
-        # 过滤掉 mlfinlab 的 metadata 列（tick_num, open_time_ms, close_time_ms, cum_buy_volume, cum_ticks, cum_dollar_value）
-        bars = bars[cls.BARS_STANDARD_COLUMNS]
-
-        # 7. 标准化 footprint：添加计算列和标记列（如果不存在）
+        # 4. 标准化 footprint：先添加计算列（在使用之前！）
         # 这确保所有数据源（CME/protobuf）都返回相同的8列结构
+        # 🔥 关键：必须在调用 _add_vwap 和 _add_volume_profile 之前完成
         if not footprint.empty:
-            # 7.1 添加计算列（如果不存在）
+            # 4.1 添加计算列（如果不存在）
             if 'total_vol' not in footprint.columns:
                 footprint['total_vol'] = footprint['bid_vol'] + footprint['ask_vol']
             if 'delta' not in footprint.columns:
                 footprint['delta'] = footprint['ask_vol'] - footprint['bid_vol']
 
-            # 7.2 添加OHLC标记列（如果不存在）
+        # 5. 添加 VWAP（需要 total_vol 列）
+        if add_vwap and 'vwap' not in bars.columns:
+            bars = cls._add_vwap(bars, footprint)
+
+        # 6. 添加 Volume Profile 指标（需要 total_vol 列）
+        if add_volume_profile:
+            if 'poc' not in bars.columns:
+                bars = cls._add_volume_profile(bars, footprint)
+
+        # 7. 过滤列：只保留标准列（使用类常量确保一致性）
+        # 过滤掉 mlfinlab 的 metadata 列（tick_num, open_time_ms, close_time_ms, cum_buy_volume, cum_ticks, cum_dollar_value）
+        bars = bars[cls.BARS_STANDARD_COLUMNS]
+
+        # 8. 添加 OHLC 标记列（如果不存在）
+        if not footprint.empty:
             if 'is_open' not in footprint.columns:
                 # 初始化所有标记列为False
                 footprint['is_open'] = False
@@ -342,7 +344,7 @@ class FootprintBarData:
                         # 某些timestamp可能没有footprint数据，跳过
                         pass
 
-        # 8. 创建实例（会自动验证）
+        # 9. 创建实例（会自动验证）
         return cls(
             bars=bars,
             footprint_df=footprint,
@@ -416,6 +418,11 @@ class FootprintBarData:
         volumes = time_data['total_vol'].values
 
         if len(prices) == 0 or volumes.sum() == 0:
+            # 🔥 BUG警告：进入early return，vah/val将等于high/low
+            # 诊断：记录这个异常情况（只在开发时启用）
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️  Volume Profile early return: len(prices)={len(prices)}, volumes.sum()={volumes.sum()}")
             return {
                 'poc': float(prices[0]) if len(prices) > 0 else 0.0,
                 'vah': float(prices.max()) if len(prices) > 0 else 0.0,
@@ -439,29 +446,44 @@ class FootprintBarData:
         accumulated_volume = sorted_volumes[poc_sorted_idx]
         low_idx = poc_sorted_idx
         high_idx = poc_sorted_idx
+        last_direction = None  # 'up' or 'down', 用于交替扩展
 
         while accumulated_volume < target_volume:
             expand_up = high_idx < len(sorted_prices) - 1
             expand_down = low_idx > 0
 
             if expand_up and expand_down:
-                up_vol = sorted_volumes[high_idx + 1] if high_idx < len(sorted_volumes) - 1 else 0
-                down_vol = sorted_volumes[low_idx - 1] if low_idx > 0 else 0
+                up_vol = sorted_volumes[high_idx + 1]
+                down_vol = sorted_volumes[low_idx - 1]
 
-                if up_vol >= down_vol:
+                # 当成交量相等时，交替扩展以保持 Value Area 居中
+                if up_vol > down_vol:
                     high_idx += 1
                     accumulated_volume += up_vol
-                else:
+                    last_direction = 'up'
+                elif down_vol > up_vol:
                     low_idx -= 1
                     accumulated_volume += down_vol
+                    last_direction = 'down'
+                else:
+                    # 成交量相等：交替扩展
+                    if last_direction == 'up':
+                        low_idx -= 1
+                        accumulated_volume += down_vol
+                        last_direction = 'down'
+                    else:
+                        # last_direction == 'down' 或 None（首次）
+                        high_idx += 1
+                        accumulated_volume += up_vol
+                        last_direction = 'up'
             elif expand_up:
                 high_idx += 1
-                if high_idx < len(sorted_volumes):
-                    accumulated_volume += sorted_volumes[high_idx]
+                accumulated_volume += sorted_volumes[high_idx]
+                last_direction = 'up'
             elif expand_down:
                 low_idx -= 1
-                if low_idx >= 0:
-                    accumulated_volume += sorted_volumes[low_idx]
+                accumulated_volume += sorted_volumes[low_idx]
+                last_direction = 'down'
             else:
                 break
 
