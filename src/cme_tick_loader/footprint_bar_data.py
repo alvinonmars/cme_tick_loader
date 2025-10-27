@@ -305,7 +305,44 @@ class FootprintBarData:
         # 过滤掉 mlfinlab 的 metadata 列（tick_num, open_time_ms, close_time_ms, cum_buy_volume, cum_ticks, cum_dollar_value）
         bars = bars[cls.BARS_STANDARD_COLUMNS]
 
-        # 7. 创建实例（会自动验证）
+        # 7. 标准化 footprint：添加计算列和标记列（如果不存在）
+        # 这确保所有数据源（CME/protobuf）都返回相同的8列结构
+        if not footprint.empty:
+            # 7.1 添加计算列（如果不存在）
+            if 'total_vol' not in footprint.columns:
+                footprint['total_vol'] = footprint['bid_vol'] + footprint['ask_vol']
+            if 'delta' not in footprint.columns:
+                footprint['delta'] = footprint['ask_vol'] - footprint['bid_vol']
+
+            # 7.2 添加OHLC标记列（如果不存在）
+            if 'is_open' not in footprint.columns:
+                # 初始化所有标记列为False
+                footprint['is_open'] = False
+                footprint['is_high'] = False
+                footprint['is_low'] = False
+                footprint['is_close'] = False
+
+                # 为每个timestamp设置标记
+                for ts in bars.index:
+                    try:
+                        # 获取该timestamp的OHLC值
+                        ohlc = {
+                            'open': bars.loc[ts, 'open'],
+                            'high': bars.loc[ts, 'high'],
+                            'low': bars.loc[ts, 'low'],
+                            'close': bars.loc[ts, 'close']
+                        }
+
+                        # 设置标记（如果价格存在于footprint中）
+                        if ts in footprint.index.get_level_values(0):
+                            for marker, price in ohlc.items():
+                                if (ts, price) in footprint.index:
+                                    footprint.loc[(ts, price), f'is_{marker}'] = True
+                    except (KeyError, IndexError):
+                        # 某些timestamp可能没有footprint数据，跳过
+                        pass
+
+        # 8. 创建实例（会自动验证）
         return cls(
             bars=bars,
             footprint_df=footprint,
