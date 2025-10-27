@@ -272,7 +272,12 @@ class FootprintBarData:
             if 'poc' not in bars.columns:
                 bars = cls._add_volume_profile(bars, footprint)
 
-        # 6. 创建实例（会自动验证）
+        # 6. 过滤列：只保留标准列（确保与所有数据源一致性）
+        # 过滤掉 mlfinlab 的 metadata 列（tick_num, open_time_ms, close_time_ms, cum_buy_volume, cum_ticks, cum_dollar_value）
+        STANDARD_COLUMNS = ['open', 'high', 'low', 'close', 'volume', 'vwap', 'poc', 'vah', 'val']
+        bars = bars[STANDARD_COLUMNS]
+
+        # 7. 创建实例（会自动验证）
         return cls(
             bars=bars,
             footprint_df=footprint,

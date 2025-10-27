@@ -1,4 +1,4 @@
 pandas>=1.3.0
 numpy>=1.21.0
-mlfinlab>=1.0.0
+mlfinlab
 plotly>=5.0.0
