@@ -5,15 +5,18 @@ Footprint Bar 数据缓存
 1. 缓存 FootprintBarData（已计算 VWAP/POC/VAH/VAL）
 2. append/merge 验证 metadata 一致性
 3. 纯内存缓存，数据源可插拔
+4. 支持按交易时长加载（支持模糊时间戳匹配）
 """
 
 from contextlib import nullcontext
 from typing import Dict, Tuple, Callable, Union
 import pandas as pd
 import threading
+import logging
 
 from .footprint_bar_data import FootprintBarData
 
+logger = logging.getLogger(__name__)
 
 # Type aliases
 CacheKey = Tuple[str, str, int]  # (symbol, resolution, num_units)
@@ -288,7 +291,364 @@ class FootprintBarDataCache:
 
         return self._has_complete_coverage(self._cache[key], start, end)
 
+    def get_by_trading_hours(
+        self,
+        symbol: str,
+        resolution: str,
+        num_units: int,
+        end_time: Union[pd.Timestamp, int],
+        trading_hours: float,
+        tolerance_seconds: float = 0.0,
+        normal_gap_threshold_hours: float = 5.0,
+        trading_time_tolerance: float = 0.8,
+        max_load_attempts: int = 5,
+        use_cache: bool = True
+    ) -> FootprintBarData:
+        """
+        按交易时长加载数据（支持模糊时间戳匹配）
+
+        核心功能：
+        1. 将交易时长需求转换为日历时间窗口
+        2. 迭代调整窗口大小，确保加载到足够的交易时长
+        3. 支持模糊时间戳匹配（容差 > 0 时）
+
+        Args:
+            symbol: 交易品种
+            resolution: 时间分辨率
+            num_units: 单位数量
+            end_time: 数据终点时间（可以是 pd.Timestamp 或 Unix 时间戳 ms）
+            trading_hours: 需要的交易时长（小时）
+            tolerance_seconds: 时间戳匹配容差（秒），0 表示精确匹配
+            normal_gap_threshold_hours: 正常交易间隔阈值（小时）
+            trading_time_tolerance: 交易时长容差（0.8 = 80%即可）
+            max_load_attempts: 最大加载尝试次数
+            use_cache: 是否使用缓存
+
+        Returns:
+            FootprintBarData: 包含bars和footprint的数据对象
+
+        算法：
+            1. 如果 tolerance_seconds > 0，进行模糊匹配（获取最新时间戳）
+            2. 初始估算：calendar_lookback = trading_hours（乐观估计）
+            3. 迭代加载：
+               - 调用 self.get 加载数据
+               - 计算实际交易时长
+               - 判断是否满足要求
+            4. 不足则扩大窗口：+1天
+            5. 如果数据过多，切片到精确的交易时长
+
+        Example:
+            >>> # 精确匹配（与原实现完全一致）
+            >>> data = cache.get_by_trading_hours(
+            ...     'GC', 'MIN', 5, end_time, trading_hours=48
+            ... )
+            >>>
+            >>> # 模糊匹配（容差30秒）
+            >>> data = cache.get_by_trading_hours(
+            ...     'GC', 'MIN', 5, end_time, trading_hours=48,
+            ...     tolerance_seconds=30
+            ... )
+        """
+        with self._lock if self._lock else nullcontext():
+            # Step 1: 标准化 end_time
+            end_time = self._normalize_timestamp(end_time)
+
+            # Step 2: 如果 tolerance > 0，进行模糊匹配
+            if tolerance_seconds > 0:
+                actual_end_time = self._find_nearest_end_time(
+                    symbol, resolution, num_units, end_time,
+                    tolerance_seconds, use_cache
+                )
+                logger.info(
+                    f"Fuzzy timestamp match: {end_time} → {actual_end_time} "
+                    f"(tolerance: {tolerance_seconds}s)"
+                )
+            else:
+                actual_end_time = end_time
+
+            # Step 3: 迭代加载（完全复制原逻辑）
+            return self._load_by_trading_hours_iterative(
+                symbol, resolution, num_units, actual_end_time,
+                trading_hours, normal_gap_threshold_hours,
+                trading_time_tolerance, max_load_attempts, use_cache
+            )
+
     # ===== Private methods =====
+
+    def _find_nearest_end_time(
+        self,
+        symbol: str,
+        resolution: str,
+        num_units: int,
+        target_time: pd.Timestamp,
+        tolerance_seconds: float,
+        use_cache: bool
+    ) -> pd.Timestamp:
+        """
+        模糊匹配：找到距离target最近的时间戳（在容差内）
+
+        策略：
+        1. 加载 target 前后各1小时的数据（足够大的窗口）
+        2. 找到距离 target 最近的时间戳（<= target）
+        3. 验证距离是否在容差内
+
+        注意：
+        - 此方法在 get_by_trading_hours() 的锁内部调用
+        - 内部会调用 self.get()，导致锁重入（RLock支持）
+
+        Args:
+            target_time: 目标时间
+            tolerance_seconds: 容差（秒）
+            use_cache: 是否使用缓存
+
+        Returns:
+            最接近的时间戳（<= target）
+
+        Raises:
+            ValueError: 容差范围内找不到数据
+        """
+        # 加载较大的窗口（target 前后各1小时）
+        window_start = target_time - pd.Timedelta(hours=1)
+        window_end = target_time + pd.Timedelta(hours=1)
+
+        logger.debug(
+            f"Fuzzy timestamp matching: loading window "
+            f"[{window_start}, {window_end}] (tolerance: {tolerance_seconds}s)"
+        )
+
+        # 调用 self.get()
+        # 注意：这会导致锁重入（RLock支持），性能开销可接受
+        recent_data = self.get(
+            symbol, resolution, num_units,
+            window_start, window_end,
+            use_cache=use_cache
+        )
+
+        if recent_data.bars.empty:
+            raise ValueError(
+                f"No data available in window [{window_start}, {window_end}]"
+            )
+
+        # 找到 <= target 的最近时间戳
+        valid_times = recent_data.bars.index[recent_data.bars.index <= target_time]
+
+        if len(valid_times) == 0:
+            raise ValueError(
+                f"No bars found before or at target time {target_time}"
+            )
+
+        # 获取最接近的时间戳
+        nearest_time = valid_times[-1]
+
+        # 验证容差
+        time_diff = abs((target_time - nearest_time).total_seconds())
+        if time_diff <= tolerance_seconds:
+            logger.info(
+                f"Fuzzy match: {target_time} → {nearest_time} (diff: {time_diff:.1f}s)"
+            )
+            return nearest_time
+        else:
+            raise ValueError(
+                f"Nearest bar at {nearest_time} is {time_diff:.1f}s away from target {target_time}, "
+                f"exceeds tolerance {tolerance_seconds}s"
+            )
+
+    def _load_by_trading_hours_iterative(
+        self,
+        symbol: str,
+        resolution: str,
+        num_units: int,
+        end_time: pd.Timestamp,
+        required_trading_hours: float,
+        normal_gap_threshold_hours: float,
+        trading_time_tolerance: float,
+        max_load_attempts: int,
+        use_cache: bool
+    ) -> FootprintBarData:
+        """
+        迭代加载直到满足交易时长
+
+        完全复制 indicator_server.load_data_by_trading_hours 的逻辑
+
+        算法：
+        1. 初始估算：calendar_lookback = required_trading_hours
+        2. 迭代加载：
+           - 调用 self.get() 加载数据
+           - 计算实际交易时长
+           - 判断是否满足要求
+        3. 不足则扩大窗口：+1天
+        4. 如果数据过多，切片到精确的交易时长
+        """
+        # 初始估算：乐观假设所有时间都是交易时间
+        calendar_lookback = pd.Timedelta(hours=required_trading_hours)
+        normal_threshold = pd.Timedelta(hours=normal_gap_threshold_hours)
+
+        logger.info(
+            f"Loading data by trading hours: {required_trading_hours:.1f}h "
+            f"(tolerance: {trading_time_tolerance})"
+        )
+
+        # 迭代加载：不够就+1天
+        bar_data = None
+        actual_hours = 0.0
+
+        for attempt in range(max_load_attempts):
+            load_start = end_time - calendar_lookback
+
+            logger.info(
+                f"Attempt {attempt + 1}/{max_load_attempts}: "
+                f"Loading {calendar_lookback.days}d {calendar_lookback.seconds//3600}h calendar window "
+                f"from [{load_start}] to [{end_time}]"
+            )
+
+            # 通过缓存层加载数据（纯日历时间）
+            bar_data = self.get(
+                symbol=symbol,
+                resolution=resolution,
+                num_units=num_units,
+                start_time=load_start,
+                end_time=end_time,
+                use_cache=use_cache
+            )
+
+            if len(bar_data.bars) == 0:
+                logger.warning(f"No data loaded in attempt {attempt + 1}")
+                calendar_lookback += pd.Timedelta(days=1)
+                continue
+
+            # 计算实际交易时长
+            actual_hours = self._calculate_trading_hours(bar_data.bars, normal_threshold)
+
+            logger.info(
+                f"  → Loaded {len(bar_data.bars)} bars, "
+                f"{actual_hours:.1f}h trading time (required: {required_trading_hours:.1f}h)"
+            )
+
+            # 检查是否满足容差
+            if actual_hours >= required_trading_hours * trading_time_tolerance:
+                logger.info(f"✓ Sufficient trading hours")
+
+                # 关键：第2+次尝试可能加载过多，需要切片到精确的交易时长
+                if attempt > 0 and actual_hours > required_trading_hours:
+                    logger.info(f"Slicing to required trading hours ({required_trading_hours:.1f}h)...")
+                    sliced_bars, sliced_footprint = self._slice_to_trading_hours(
+                        bar_data.bars, bar_data.footprint_df,
+                        required_trading_hours, normal_threshold
+                    )
+                    # 创建切片后的 FootprintBarData
+                    bar_data = FootprintBarData(
+                        bars=sliced_bars,
+                        footprint_df=sliced_footprint,
+                        resolution=resolution,
+                        num_units=num_units
+                    )
+                    # 打印切片后数据范围和时长
+                    actual_hours = self._calculate_trading_hours(bar_data.bars, normal_threshold)
+                    logger.info(
+                        f"Sliced data: {len(bar_data.bars)} bars, "
+                        f"{actual_hours:.1f}h trading time "
+                        f"from [{bar_data.bars.index[0]} to {bar_data.bars.index[-1]}]"
+                    )
+
+                return bar_data
+
+            # 不够就+1天
+            calendar_lookback += pd.Timedelta(days=1)
+            logger.info(f"  → Insufficient, expanding window to {calendar_lookback.days}d")
+
+        # 达到最大尝试次数，返回最后一次的数据（即使不够也返回）
+        if bar_data is not None and len(bar_data.bars) > 0:
+            logger.warning(
+                f"Reached max attempts ({max_load_attempts}), "
+                f"returning data with {actual_hours:.1f}h (required: {required_trading_hours:.1f}h)"
+            )
+            return bar_data
+        else:
+            logger.error(f"Failed to load any data after {max_load_attempts} attempts")
+            # 返回空的 FootprintBarData
+            return self._empty_bar_data(resolution, num_units)
+
+    @staticmethod
+    def _calculate_trading_hours(bars: pd.DataFrame, normal_threshold: pd.Timedelta) -> float:
+        """
+        计算实际交易时长（排除周末/节假日大间隔）
+
+        策略：只累加相邻bar之间的"正常"间隔（<阈值）
+
+        Args:
+            bars: bar数据
+            normal_threshold: 正常间隔阈值
+
+        Returns:
+            交易时长（小时）
+        """
+        if len(bars) < 2:
+            return 0.0
+
+        # 计算相邻bar的时间间隔
+        time_diffs = bars.index.to_series().diff().dropna()
+
+        # 只累加"正常"间隔，过滤周末/节假日的大间隔
+        normal_intervals = time_diffs[time_diffs < normal_threshold]
+
+        trading_hours = normal_intervals.sum().total_seconds() / 3600
+
+        return trading_hours
+
+    @staticmethod
+    def _slice_to_trading_hours(
+        bars: pd.DataFrame,
+        footprint: pd.DataFrame,
+        required_hours: float,
+        normal_threshold: pd.Timedelta
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        切片到指定的交易时长（从最新向前回溯）
+
+        策略：从最新的bar向前累计交易时间，直到达到required_hours
+
+        Args:
+            bars: bar数据
+            footprint: footprint数据
+            required_hours: 需要的交易时长
+            normal_threshold: 正常间隔阈值
+
+        Returns:
+            (切片后的bars, 切片后的footprint)
+        """
+        if len(bars) < 2:
+            return bars, footprint
+
+        # 从后往前累计交易时间
+        accumulated_hours = 0.0
+        cutoff_index = 0
+
+        for i in range(len(bars) - 1, 0, -1):
+            gap = bars.index[i] - bars.index[i - 1]
+
+            # 只累加正常间隔
+            if gap < normal_threshold:
+                accumulated_hours += gap.total_seconds() / 3600
+
+            # 达到要求的交易时长
+            if accumulated_hours >= required_hours:
+                cutoff_index = i - 1
+                break
+
+        # 切片 bars
+        sliced_bars = bars.iloc[cutoff_index:]
+
+        # 切片 footprint（保持一致）
+        sliced_footprint = footprint[
+            footprint.index.get_level_values(0).isin(sliced_bars.index)
+        ]
+
+        logger.info(
+            f"Sliced: {len(bars)} → {len(sliced_bars)} bars "
+            f"({accumulated_hours:.1f}h trading time)"
+        )
+
+        return sliced_bars, sliced_footprint
 
     @staticmethod
     def _validate_metadata(bar_data: FootprintBarData, resolution: str, num_units: int) -> None:
