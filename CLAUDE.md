@@ -1,6 +1,6 @@
 # CME Bars Loader - Technical Documentation
 
-**Version 2.0** - Based on mlfinlab API
+**Version 2.5** - Based on mlfinlab API
 
 ---
 
@@ -26,10 +26,11 @@ CME Bars Loader 是一个高效的金融数据加载库，基于 mlfinlab API，
 
 - **基于 mlfinlab**：100% 委托聚合逻辑给 mlfinlab，确保正确性
 - **多种 Bar 类型**：支持 TIME, VOLUME, TICK, DOLLAR bars
+- **预聚合数据加载**：支持直接加载已聚合的 OHLC + Footprint 数据（无需从 tick 聚合）
 - **两级缓存**：tick cache + result cache，提升性能
 - **按天管理**：自动处理单天数据，避免跨天状态污染
 - **时间戳修复**：自动修复 TIME bars 的 Unix timestamp
-- **预聚合**：避免重复 (时间,价格) 索引问题
+- **Tick 预聚合**：避免重复 (时间,价格) 索引问题
 
 ---
 
@@ -63,17 +64,33 @@ loader = CMEBarsLoader(base_path='/your/data/path')
 **数据文件结构**:
 ```
 base_path/
-├── GC_1/
+├── GC_1/                          # 原始 tick 数据（按天）
 │   ├── GC_1_footprint_20210104.csv
 │   └── ...
+├── GC_Daily/                      # 预聚合 Daily 数据（可选）
+│   ├── GC_Daily_ohlc_20121120.csv
+│   ├── GC_Daily_footprint_20121120.csv
+│   └── ...
+├── GC_Hourly/                     # 预聚合 Hourly 数据（可选）
+│   ├── GC_Hourly_ohlc_20210104.csv
+│   └── ...
 └── .cache/
-    ├── ticks/          # Tick cache
-    └── results/        # Result cache
+    ├── ticks/                     # Tick cache
+    └── results/                   # Result cache
 ```
+
+**注意**：
+- 原始 tick 数据存储在 `{symbol}_1/` 目录（必需）
+- 预聚合数据存储在 `{symbol}_{resolution}/` 目录（可选）
+  - `resolution='D'` → `{symbol}_Daily/`
+  - `resolution='H'` → `{symbol}_Hourly/`
+  - `resolution='MIN'` → `{symbol}_Minute/`
 
 ---
 
 ## Quick Start
+
+### 方式 1：从 Tick 数据聚合（默认）
 
 ```python
 from cme_tick_loader import CMEBarsLoader
@@ -96,12 +113,37 @@ footprint = result['footprint'] # MultiIndex(bar_timestamp, price)
 print(f"Loaded {len(bars)} bars")
 ```
 
+### 方式 2：直接加载预聚合数据
+
+```python
+from cme_tick_loader import CMEBarsLoader
+
+# 初始化
+loader = CMEBarsLoader()
+
+# 加载预聚合的 Daily bars
+result = loader.load_bars(
+    symbol='GC',
+    date='20121120',
+    resolution='D',
+    num_units=1,
+    load_preaggregated=True  # 直接加载已聚合数据
+)
+
+# 访问数据（格式与方式 1 完全一致）
+bars = result['bars']
+footprint = result['footprint']
+
+print(f"Loaded {len(bars)} bars from preaggregated data")
+```
+
 ---
 
 ## Core Architecture
 
 ### 数据流
 
+**方式 1：从 Tick 数据聚合**（默认）
 ```
 CME CSV (按天)
     ↓
@@ -116,6 +158,21 @@ mlfinlab API (batch_size=50000000)
 修复 TIME bars timestamp
     ↓
 返回结果
+```
+
+**方式 2：直接加载预聚合数据**（`load_preaggregated=True`）
+```
+预聚合 CSV 文件
+    ├── {symbol}_{resolution}_ohlc_{date}.csv
+    └── {symbol}_{resolution}_footprint_{date}.csv
+    ↓
+直接加载 OHLC + Footprint
+    ↓
+格式化为 mlfinlab 格式
+    ↓
+{'bars': DataFrame, 'footprint': DataFrame}
+    ↓
+返回结果（无缓存）
 ```
 
 ### 关键设计
@@ -133,7 +190,7 @@ mlfinlab API (batch_size=50000000)
 
 ### CMEBarsLoader
 
-#### `load_bars(symbol, date, resolution='MIN', num_units=5, use_cache=True, refresh_cache=False, verbose=False, timezone_naive=True, set_index=True)`
+#### `load_bars(symbol, date, resolution='MIN', num_units=5, use_cache=True, refresh_cache=False, verbose=False, timezone_naive=True, set_index=True, load_preaggregated=False)`
 
 加载单日 bars 和 footprint（总是同时返回）。
 
@@ -155,6 +212,10 @@ mlfinlab API (batch_size=50000000)
 - `set_index`: 是否将date_time设为DataFrame的index (default: True)
   - `True`: `bars.index = bars.date_time.values`（兼容mlfinlab），保留date_time列
   - `False`: 使用默认整数索引（RangeIndex）
+- `load_preaggregated`: 是否直接加载预聚合数据 (default: False)
+  - `True`: 从 `{symbol}_{resolution}/` 目录加载预聚合的 OHLC 和 footprint CSV
+  - `False`: 从 tick 数据聚合（原有逻辑）
+  - **注意**：启用后会跳过缓存系统，直接读取文件
 
 **返回**:
 ```python
@@ -506,6 +567,68 @@ chart.save_html('gc_analysis.html')
 # 请改用 ChartAPI
 ```
 
+### Example 7: 加载预聚合数据
+
+**适用场景**：当你已经有预先聚合好的 OHLC 和 footprint 数据时，可以跳过 tick 聚合步骤，直接加载。
+
+**数据要求**：
+- OHLC 文件：`{symbol}_{resolution}_ohlc_{date}.csv`
+  - 列：`symbol, timeframe, timestamp_ms, open, high, low, close, volume`
+- Footprint 文件：`{symbol}_{resolution}_footprint_{date}.csv`
+  - 列：`symbol, timeframe, timestamp_ms, price, bid_qty, ask_qty`
+
+**示例**：
+```python
+loader = CMEBarsLoader()
+
+# 加载预聚合的 Daily 数据
+result = loader.load_bars(
+    symbol='GC',
+    date='20121120',
+    resolution='D',
+    num_units=1,
+    load_preaggregated=True  # 关键参数
+)
+
+bars = result['bars']
+footprint = result['footprint']
+
+print(f"Bars shape: {bars.shape}")           # (1, 12) - 单个 Daily bar
+print(f"Footprint shape: {footprint.shape}") # (97, 8) - 97 个价格级别
+
+# 返回格式与 mlfinlab 完全一致
+print(bars.columns.tolist())
+# ['date_time', 'tick_num', 'open_time_ms', 'close_time_ms',
+#  'open', 'high', 'low', 'close', 'volume',
+#  'cum_buy_volume', 'cum_ticks', 'cum_dollar_value']
+
+print(footprint.columns.tolist())
+# ['bid_vol', 'ask_vol', 'total_vol', 'delta',
+#  'is_open', 'is_high', 'is_low', 'is_close']
+```
+
+**目录结构示例**：
+```
+/data/cme_futures/
+└── GC_Daily/
+    ├── GC_Daily_ohlc_20121120.csv
+    ├── GC_Daily_footprint_20121120.csv
+    ├── GC_Daily_ohlc_20121121.csv
+    └── GC_Daily_footprint_20121121.csv
+```
+
+**Resolution 映射**：
+- `'D'` → `GC_Daily/`
+- `'H'` → `GC_Hourly/`
+- `'MIN'` → `GC_Minute/`
+- `'S'` → `GC_Second/`
+
+**注意事项**：
+1. **无缓存**：预聚合数据加载不使用缓存系统，每次都直接读取文件
+2. **文件要求**：必须同时存在 OHLC 和 footprint 文件，否则抛出 `FileNotFoundError`
+3. **格式兼容**：返回格式与 mlfinlab 完全一致，可直接用于 `StandardBarData.from_result()`
+4. **参数支持**：`timezone_naive` 和 `set_index` 参数仍然有效
+
 ---
 
 ## Caching Strategy
@@ -633,10 +756,20 @@ plotly>=5.0.0  # optional
 
 ---
 
-**Version**: 2.4
-**Last Updated**: 2025-10-23
+**Version**: 2.5
+**Last Updated**: 2025-11-19
 
 ## Changelog
+
+**v2.5** (2025-11-19) - 支持预聚合数据加载
+- 🟢 新增 `load_preaggregated` 参数，支持直接加载预聚合的 OHLC + Footprint 数据
+- 🟢 实现 `_load_preaggregated_bars()` 及相关辅助函数
+- 🟢 支持 resolution 到目录名的映射（`'D'` → `'Daily'`）
+- 🟢 无缓存设计，直接读取文件，避免影响原有逻辑
+- 🟢 返回格式与 mlfinlab 完全兼容
+- 📚 添加 Example 7: 加载预聚合数据
+- 📚 更新数据文件结构说明
+- 📚 更新 Core Architecture 数据流图
 
 **v2.4** (2025-10-23) - 引入 ChartAPI 专业可视化
 - 🟢 新增 `ChartAPI` 类，支持蜡烛图 + 多技术指标子图

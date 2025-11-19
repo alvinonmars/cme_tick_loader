@@ -50,7 +50,7 @@ class CMEBarsLoader:
 
     def load_bars(self, symbol, date, resolution='MIN', num_units=5,
                   use_cache=True, refresh_cache=False, verbose=False,
-                  timezone_naive=True, set_index=True):
+                  timezone_naive=True, set_index=True, load_preaggregated=False):
         """
         加载单日 bars 和 footprint
 
@@ -74,6 +74,9 @@ class CMEBarsLoader:
             set_index: 是否将date_time设为index (default: True)
                 True: bars.index = bars.date_time.values，保留date_time列
                 False: 使用默认整数索引
+            load_preaggregated: 是否直接加载预聚合数据 (default: False)
+                True: 从 {symbol}_{resolution}/ 目录加载预聚合的 OHLC 和 footprint
+                False: 从 tick 数据聚合（原有逻辑）
 
         Returns:
             dict: 始终返回完整的 bars 和 footprint
@@ -88,6 +91,10 @@ class CMEBarsLoader:
             bars = result['bars']
             footprint = result['footprint']
 
+            # 加载预聚合的 Daily 数据
+            result = loader.load_bars('GC', '20210104', resolution='D', num_units=1,
+                                     load_preaggregated=True)
+
             # 保留UTC timezone
             result = loader.load_bars('GC', '20210104', resolution='MIN', num_units=5,
                                      timezone_naive=False)
@@ -96,6 +103,17 @@ class CMEBarsLoader:
             result = loader.load_bars('GC', '20210104', resolution='MIN', num_units=5,
                                      set_index=False)
         """
+        # Step 0: 如果 load_preaggregated=True，走预聚合数据加载路径
+        if load_preaggregated:
+            result = self._load_preaggregated_bars(symbol, date, resolution)
+            if result is None:
+                raise FileNotFoundError(
+                    f"Preaggregated data not found for {symbol} {date} {resolution}"
+                )
+            # 应用datetime格式处理
+            result = self._process_datetime_format(result, timezone_naive, set_index)
+            return result
+
         # Step 1: 生成 result cache key
         result_cache_key = self._get_result_cache_key(symbol, date, resolution, num_units)
 
@@ -524,3 +542,205 @@ class CMEBarsLoader:
             ticksize = loader.get_ticksize('ES')  # 0.25
         """
         return self.tick_loader.get_ticksize(symbol)
+
+    # ========== 预聚合数据加载 ==========
+
+    def _get_preaggregated_dir_name(self, resolution):
+        """
+        将 resolution 转换为预聚合数据目录名
+
+        Args:
+            resolution: 'D', 'H', 'MIN', etc.
+
+        Returns:
+            目录名后缀 (e.g., 'Daily', 'Hourly', '5Min')
+        """
+        # 映射 resolution 到目录名
+        resolution_map = {
+            'D': 'Daily',
+            'H': 'Hourly',
+            'MIN': 'Minute',
+            'S': 'Second'
+        }
+
+        # 如果是预定义的 resolution，使用映射
+        if resolution in resolution_map:
+            return resolution_map[resolution]
+
+        # 否则直接使用 resolution（如 'VOLUME', 'TICK', 'DOLLAR'）
+        return resolution
+
+    def _load_preaggregated_bars(self, symbol, date, resolution):
+        """
+        加载预聚合的 bars 和 footprint（主函数）
+
+        Args:
+            symbol: 交易符号 (e.g., 'GC')
+            date: 日期字符串 YYYYMMDD (e.g., '20210104')
+            resolution: bar 类型 (e.g., 'D', 'H', 'MIN')
+
+        Returns:
+            dict: {'bars': DataFrame, 'footprint': DataFrame} or None
+        """
+        # 1. 加载 OHLC
+        ohlc_df = self._load_preaggregated_ohlc(symbol, date, resolution)
+        if ohlc_df is None:
+            return None
+
+        # 2. 加载 footprint
+        footprint_df = self._load_preaggregated_footprint(symbol, date, resolution)
+        if footprint_df is None:
+            return None
+
+        # 3. 格式化为 mlfinlab 格式
+        bars = self._format_ohlc_to_bars(ohlc_df, footprint_df)
+        footprint = self._format_footprint_to_mlfinlab(footprint_df, ohlc_df)
+
+        return {'bars': bars, 'footprint': footprint}
+
+    def _load_preaggregated_ohlc(self, symbol, date, resolution):
+        """
+        加载预聚合的 OHLC CSV 文件
+
+        Args:
+            symbol: 交易符号
+            date: 日期字符串 YYYYMMDD
+            resolution: bar 类型 (e.g., 'D')
+
+        Returns:
+            DataFrame or None
+        """
+        # 获取目录名后缀 (e.g., 'Daily')
+        dir_suffix = self._get_preaggregated_dir_name(resolution)
+
+        # 路径: {base_path}/{symbol}_{dir_suffix}/{symbol}_{dir_suffix}_ohlc_{date}.csv
+        dir_name = f"{symbol}_{dir_suffix}"
+        file_name = f"{symbol}_{dir_suffix}_ohlc_{date}.csv"
+        file_path = self.base_path / dir_name / file_name
+
+        if not file_path.exists():
+            return None
+
+        # 读取 CSV
+        df = pd.read_csv(file_path)
+        return df
+
+    def _load_preaggregated_footprint(self, symbol, date, resolution):
+        """
+        加载预聚合的 footprint CSV 文件
+
+        Args:
+            symbol: 交易符号
+            date: 日期字符串 YYYYMMDD
+            resolution: bar 类型 (e.g., 'D')
+
+        Returns:
+            DataFrame or None
+        """
+        # 获取目录名后缀 (e.g., 'Daily')
+        dir_suffix = self._get_preaggregated_dir_name(resolution)
+
+        # 路径: {base_path}/{symbol}_{dir_suffix}/{symbol}_{dir_suffix}_footprint_{date}.csv
+        dir_name = f"{symbol}_{dir_suffix}"
+        file_name = f"{symbol}_{dir_suffix}_footprint_{date}.csv"
+        file_path = self.base_path / dir_name / file_name
+
+        if not file_path.exists():
+            return None
+
+        # 读取 CSV
+        df = pd.read_csv(file_path)
+        return df
+
+    def _format_ohlc_to_bars(self, ohlc_df, footprint_df):
+        """
+        将 OHLC CSV 格式化为 mlfinlab bars DataFrame
+
+        Args:
+            ohlc_df: OHLC DataFrame
+                列: symbol, timeframe, timestamp_ms, open, high, low, close, volume
+            footprint_df: footprint DataFrame（用于计算 cum_buy_volume 等）
+
+        Returns:
+            bars DataFrame (mlfinlab 格式)
+        """
+        # 提取第一行（Daily bar 只有一行）
+        row = ohlc_df.iloc[0]
+
+        # 转换 timestamp_ms 为 datetime（UTC）
+        date_time = pd.to_datetime(row['timestamp_ms'], unit='ms', utc=True)
+
+        # 从 footprint 计算衍生字段
+        cum_buy_volume = int(footprint_df['ask_qty'].sum())  # 主动买入 = ask_qty
+        cum_ticks = len(footprint_df)  # footprint 行数 = tick 数
+        cum_dollar_value = float(row['volume'] * row['close'])  # 近似计算
+
+        # 构建 bars DataFrame
+        bars = pd.DataFrame({
+            'date_time': [date_time],
+            'tick_num': [1],  # 单个 Daily bar
+            'open_time_ms': [int(row['timestamp_ms'])],
+            'close_time_ms': [int(row['timestamp_ms'])],
+            'open': [float(row['open'])],
+            'high': [float(row['high'])],
+            'low': [float(row['low'])],
+            'close': [float(row['close'])],
+            'volume': [int(row['volume'])],
+            'cum_buy_volume': [cum_buy_volume],
+            'cum_ticks': [cum_ticks],
+            'cum_dollar_value': [cum_dollar_value]
+        })
+
+        return bars
+
+    def _format_footprint_to_mlfinlab(self, footprint_df, ohlc_df):
+        """
+        将 footprint CSV 格式化为 mlfinlab footprint DataFrame
+
+        Args:
+            footprint_df: footprint DataFrame
+                列: symbol, timeframe, timestamp_ms, price, bid_qty, ask_qty
+            ohlc_df: OHLC DataFrame（用于判断 is_open, is_high 等）
+
+        Returns:
+            footprint DataFrame (MultiIndex: bar_timestamp, price)
+        """
+        # 提取 OHLC 价格
+        ohlc_row = ohlc_df.iloc[0]
+        open_price = float(ohlc_row['open'])
+        high_price = float(ohlc_row['high'])
+        low_price = float(ohlc_row['low'])
+        close_price = float(ohlc_row['close'])
+
+        # 转换 timestamp_ms 为 datetime（UTC）
+        bar_timestamp = pd.to_datetime(footprint_df['timestamp_ms'].iloc[0], unit='ms', utc=True)
+
+        # 计算衍生字段
+        footprint_df = footprint_df.copy()
+        footprint_df['total_vol'] = footprint_df['bid_qty'] + footprint_df['ask_qty']
+        footprint_df['delta'] = footprint_df['ask_qty'] - footprint_df['bid_qty']
+
+        # 判断 OHLC 标记（使用浮点数比较容差）
+        epsilon = 1e-6
+        footprint_df['is_open'] = (footprint_df['price'] - open_price).abs() < epsilon
+        footprint_df['is_high'] = (footprint_df['price'] - high_price).abs() < epsilon
+        footprint_df['is_low'] = (footprint_df['price'] - low_price).abs() < epsilon
+        footprint_df['is_close'] = (footprint_df['price'] - close_price).abs() < epsilon
+
+        # 构建 MultiIndex
+        footprint_df['bar_timestamp'] = bar_timestamp
+        footprint_df = footprint_df.set_index(['bar_timestamp', 'price'])
+
+        # 选择需要的列（匹配 mlfinlab 格式）
+        footprint_df = footprint_df[[
+            'bid_qty', 'ask_qty', 'total_vol', 'delta',
+            'is_open', 'is_high', 'is_low', 'is_close'
+        ]]
+
+        # 重命名列以匹配 mlfinlab
+        footprint_df = footprint_df.rename(columns={
+            'bid_qty': 'bid_vol',
+            'ask_qty': 'ask_vol'
+        })
+
+        return footprint_df

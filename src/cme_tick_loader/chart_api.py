@@ -832,6 +832,95 @@ class ChartAPI:
 
         return self.add_lines(vlines_df)
 
+    def add_scatter(
+        self,
+        x_values: List[pd.Timestamp],
+        y_values: List[float],
+        mode: str = 'markers',
+        marker: dict = None,
+        line: dict = None,
+        name: str = 'Scatter',
+        showlegend: bool = True
+    ) -> 'ChartAPI':
+        """
+        添加散点图或线图
+
+        Args:
+            x_values: x坐标（时间戳）列表
+            y_values: y坐标（价格）列表
+            mode: 绘制模式 ('markers', 'lines', 'lines+markers')
+            marker: marker样式字典，例如 dict(size=8, color='red', symbol='triangle-down')
+            line: line样式字典，例如 dict(color='red', width=2, dash='dash')
+            name: trace名称（显示在legend中）
+            showlegend: 是否显示在legend中
+
+        Returns:
+            self: 支持链式调用
+
+        Example:
+            # 添加Peak点（markers）
+            chart.add_scatter(
+                [ts1, ts2], [price1, price2],
+                mode='markers',
+                marker=dict(size=8, color='red', symbol='triangle-down'),
+                name='PEAK_HIGH'
+            )
+
+            # 添加趋势线（lines）
+            chart.add_scatter(
+                [start_ts, end_ts], [start_price, end_price],
+                mode='lines',
+                line=dict(color='red', width=2, dash='dash'),
+                name='Trend Line'
+            )
+        """
+        if len(x_values) == 0 or len(y_values) == 0:
+            print("⚠️  Empty x_values or y_values, skipping")
+            return self
+
+        if len(x_values) != len(y_values):
+            raise ValueError(f"x_values and y_values must have same length: {len(x_values)} vs {len(y_values)}")
+
+        # 转换为x坐标（支持索引模式）
+        x_coords = [self._to_x_coord(ts) for ts in x_values]
+
+        # 构建trace参数
+        trace_kwargs = {
+            'x': x_coords,
+            'y': y_values,
+            'mode': mode,
+            'name': name,
+            'showlegend': showlegend
+        }
+
+        # 添加marker样式
+        if marker and 'markers' in mode:
+            trace_kwargs['marker'] = marker
+
+        # 添加line样式
+        if line and 'lines' in mode:
+            trace_kwargs['line'] = line
+
+        # 创建Scatter trace
+        scatter_trace = go.Scatter(**trace_kwargs)
+
+        # 添加时间戳到hover信息（索引模式）
+        if self.use_index_mode:
+            timestamp_strs = [ts.strftime('%Y-%m-%d %H:%M:%S') for ts in x_values]
+            scatter_trace.customdata = timestamp_strs
+            scatter_trace.hovertemplate = '<b>Time: %{customdata}</b><br>Price: %{y:.2f}<extra></extra>'
+
+        # 添加到主图（如果有子图的话）
+        if hasattr(self.fig, '_grid_ref') and self.fig._grid_ref is not None and len(self.fig._grid_ref) > 1:
+            # 有子图，添加到主图（row=1）
+            self.fig.add_trace(scatter_trace, row=1, col=1)
+        else:
+            # 单图，正常添加
+            self.fig.add_trace(scatter_trace)
+
+        print(f"✅ Added scatter trace: {name} ({len(x_values)} points, mode={mode})")
+        return self
+
     def add_labels(self, labels_df: pd.DataFrame) -> 'ChartAPI':
         """
         添加文本标签
